@@ -534,6 +534,6 @@ st.download_button("Download Report (.xlsx)", generate_excel(), "carbon_footprin
 
 st.subheader("About This Calculator")
 st.markdown("""
-I created this GHG inventory calculator mostly to speed up my own personal yearly estimates -- see my [blog post](https://www.mygreenlab.org/blog/personal-carbon-calculator) for more details.
-This calculator is fully open source: code is available on the associated [GitHub repository](https://github.com/adamlechowicz/ghg-accounting), and licensed under the [MIT License](https://opensource.org/licenses/MIT).
+I created this GHG inventory calculator mostly to speed up my own personal yearly estimates -- see my [blog post](https://adamlechowicz.github.io/blog) for more details.
+This calculator is fully open source: code is available on the associated [GitHub repository](https://github.com/adamlechowicz/ghg-accounting), and licensed under the [MIT License](https://raw.githubusercontent.com/adamlechowicz/ghg-accounting/refs/heads/main/LICENSE).
 """)
