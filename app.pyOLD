@@ -1,0 +1,333 @@
+import streamlit as st
+import pandas as pd
+import io
+import plotly.express as px
+
+# --- CONSTANTS & EMISSION FACTORS (Based on your provided sheet + EPA standards) ---
+# All factors are converted to standardized units for calculation, then to Metric Tons for display.
+
+FACTORS = {
+    # Scope 1: Vehicle
+    "gasoline": {
+        "co2_kg_per_gal": 8.78,
+        "ch4_g_per_gal": 0.38,
+        "n2o_g_per_gal": 0.08
+    },
+    # Scope 1: Heating (Added for generalization)
+    "fuel_oil": { # Distillate Fuel Oil No. 2
+        "co2_kg_per_gal": 10.21, 
+        "ch4_g_per_gal": 0.41,
+        "n2o_g_per_gal": 0.08
+    },
+    "natural_gas": { 
+        "co2_kg_per_therm": 5.3, # Approx based on EPA 53.06 kg/mmBtu
+        "ch4_g_per_therm": 0.1, 
+        "n2o_g_per_therm": 0.01 
+    },
+    # Scope 2: Electricity (MA/Grid average from your sheet)
+    "electricity": {
+        "co2_kg_per_mwh": 243.3196,
+        "ch4_g_per_mwh": 28.6,
+        "n2o_g_per_mwh": 3.6
+    },
+    # Scope 3: Air Travel
+    "air_short": { # < 300 miles
+        "co2_kg_per_mi": 0.207,
+        "ch4_g_per_mi": 0.0064,
+        "n2o_g_per_mi": 0.0066
+    },
+    "air_medium": { # 300 - 2300 miles
+        "co2_kg_per_mi": 0.12926,
+        "ch4_g_per_mi": 0.00064,
+        "n2o_g_per_mi": 0.00410
+    },
+    "air_long": { # > 2300 miles
+        "co2_kg_per_mi": 0.16256,
+        "ch4_g_per_mi": 0.00064,
+        "n2o_g_per_mi": 0.00518
+    },
+    # Scope 3: Rail Travel
+    "rail_ne": { # Northeast Corridor
+        "co2_kg_per_mi": 0.058,
+        "ch4_g_per_mi": 0.0055,
+        "n2o_g_per_mi": 0.0007
+    },
+    "rail_other": {
+        "co2_kg_per_mi": 0.15,
+        "ch4_g_per_mi": 0.0117,
+        "n2o_g_per_mi": 0.0038
+    },
+    # GWP
+    "gwp": {
+        "co2": 1,
+        "ch4": 28,
+        "n2o": 265
+    }
+}
+
+def calculate_co2e(amount, factor_key, unit_conversion=1):
+    """
+    Helper to calculate total CO2e (kg) given an amount and a factor key.
+    unit_conversion: multiplier to adjust input units (e.g. kWh -> MWh is 0.001)
+    """
+    f = FACTORS[factor_key]
+    co2 = amount * unit_conversion * f[f"co2_{'kg' if 'kg' in list(f.keys())[0] else 'g'}_per_{list(f.keys())[0].split('_')[-1]}"]
+    
+    # CH4 and N2O are usually in grams, need to convert to kg then apply GWP
+    ch4_g = amount * unit_conversion * f[f"ch4_g_per_{list(f.keys())[1].split('_')[-1]}"]
+    n2o_g = amount * unit_conversion * f[f"n2o_g_per_{list(f.keys())[2].split('_')[-1]}"]
+    
+    co2e_kg = (co2 * FACTORS["gwp"]["co2"]) + \
+              (ch4_g / 1000 * FACTORS["gwp"]["ch4"]) + \
+              (n2o_g / 1000 * FACTORS["gwp"]["n2o"])
+    return co2e_kg
+
+# --- STREAMLIT APP ---
+
+st.set_page_config(page_title="Personal Carbon Calculator", layout="wide")
+
+st.title("🌱 Personal Greenhouse Gas Emissions Calculator")
+st.markdown("""
+This tool helps you estimate your personal annual carbon footprint (Scope 1, 2, and 3). 
+It calculates emissions based on EPA factors and exports a detailed spreadsheet including the formulas used.
+""")
+
+# --- SIDEBAR INPUTS ---
+
+st.sidebar.header("1. Vehicle (Scope 1)")
+car_miles = st.sidebar.number_input("Miles Driven (Year)", value=7989, help="Total miles driven in the year")
+car_mpg = st.sidebar.number_input("Average MPG", value=34.2)
+gallons_gas = car_miles / car_mpg if car_mpg > 0 else 0
+st.sidebar.caption(f"Estimated Gasoline: {gallons_gas:.2f} gallons")
+
+st.sidebar.header("2. Home Heating (Scope 1/2)")
+heat_source = st.sidebar.selectbox("Primary Heating Source", 
+                                   ["Electric (Heat Pumps)", "Fuel Oil", "Natural Gas"])
+
+oil_gallons = 0
+nat_gas_therms = 0
+
+if heat_source == "Fuel Oil":
+    oil_gallons = st.sidebar.number_input("Gallons of Oil Consumed", value=0)
+elif heat_source == "Natural Gas":
+    nat_gas_therms = st.sidebar.number_input("Therms of Gas Consumed", value=0)
+else:
+    st.sidebar.caption("Electric heating is included in your electricity usage below.")
+
+st.sidebar.header("3. Electricity (Scope 2)")
+elec_total_kwh = st.sidebar.number_input("Total Annual Electricity (kWh)", value=8744)
+
+st.sidebar.header("4. Travel (Scope 3)")
+st.sidebar.markdown("**Air Travel (Miles)**")
+air_short = st.sidebar.number_input("Short Haul (<300 mi)", value=1155)
+air_med = st.sidebar.number_input("Medium Haul (300-2300 mi)", value=8680)
+air_long = st.sidebar.number_input("Long Haul (>2300 mi)", value=20241)
+
+st.sidebar.markdown("**Rail Travel (Miles)**")
+rail_ne = st.sidebar.number_input("Northeast Corridor", value=451)
+rail_other = st.sidebar.number_input("Other Routes", value=207)
+
+# --- CALCULATIONS ---
+
+results = []
+
+# Scope 1: Vehicle
+co2e_vehicle = calculate_co2e(gallons_gas, "gasoline")
+results.append({"Category": "Vehicle (Gas)", "Scope": "Scope 1", "CO2e (kg)": co2e_vehicle})
+
+# Scope 1: Heating (Non-Electric)
+co2e_heating = 0
+if heat_source == "Fuel Oil":
+    co2e_heating = calculate_co2e(oil_gallons, "fuel_oil")
+    results.append({"Category": "Heating (Oil)", "Scope": "Scope 1", "CO2e (kg)": co2e_heating})
+elif heat_source == "Natural Gas":
+    co2e_heating = calculate_co2e(nat_gas_therms, "natural_gas")
+    results.append({"Category": "Heating (Gas)", "Scope": "Scope 1", "CO2e (kg)": co2e_heating})
+
+# Scope 2: Electricity
+# Note: Input is kWh, Factor is MWh, so convert by 0.001
+co2e_elec = calculate_co2e(elec_total_kwh, "electricity", unit_conversion=0.001)
+results.append({"Category": "Electricity", "Scope": "Scope 2", "CO2e (kg)": co2e_elec})
+
+# Scope 3: Air
+co2e_air_s = calculate_co2e(air_short, "air_short")
+co2e_air_m = calculate_co2e(air_med, "air_medium")
+co2e_air_l = calculate_co2e(air_long, "air_long")
+results.append({"Category": "Air Travel (Short)", "Scope": "Scope 3", "CO2e (kg)": co2e_air_s})
+results.append({"Category": "Air Travel (Med)", "Scope": "Scope 3", "CO2e (kg)": co2e_air_m})
+results.append({"Category": "Air Travel (Long)", "Scope": "Scope 3", "CO2e (kg)": co2e_air_l})
+
+# Scope 3: Rail
+co2e_rail_ne = calculate_co2e(rail_ne, "rail_ne")
+co2e_rail_o = calculate_co2e(rail_other, "rail_other")
+results.append({"Category": "Rail (NE Corridor)", "Scope": "Scope 3", "CO2e (kg)": co2e_rail_ne})
+results.append({"Category": "Rail (Other)", "Scope": "Scope 3", "CO2e (kg)": co2e_rail_o})
+
+df_res = pd.DataFrame(results)
+df_res["CO2e (Metric Tons)"] = df_res["CO2e (kg)"] / 1000
+total_emissions = df_res["CO2e (Metric Tons)"].sum()
+
+# --- DISPLAY ---
+
+col1, col2 = st.columns([2, 1])
+
+with col1:
+    st.subheader("Emission Breakdown")
+    fig = px.pie(df_res, values='CO2e (Metric Tons)', names='Category', hole=0.4,
+                 color_discrete_sequence=px.colors.qualitative.Prism)
+    st.plotly_chart(fig, use_container_width=True)
+
+with col2:
+    st.subheader("Summary")
+    st.metric(label="Total Emissions", value=f"{total_emissions:.2f} MT CO2e")
+    
+    st.markdown("### By Scope")
+    scope_group = df_res.groupby("Scope")["CO2e (Metric Tons)"].sum()
+    for scope, val in scope_group.items():
+        st.write(f"**{scope}:** {val:.2f} MT")
+
+# --- EXCEL EXPORT LOGIC ---
+
+def to_excel_with_formulas(df_data, inputs_dict):
+    output = io.BytesIO()
+    workbook = xlsxwriter.Workbook(output, {'in_memory': True})
+    
+    # Format objects
+    bold = workbook.add_format({'bold': True})
+    header_fmt = workbook.add_format({'bold': True, 'bg_color': '#D3D3D3', 'border': 1})
+    num_fmt = workbook.add_format({'num_format': '0.00'})
+    
+    worksheet = workbook.add_worksheet("Carbon Footprint")
+    
+    # --- SECTION 1: EMISSION FACTORS ---
+    worksheet.write("A1", "EMISSION FACTORS & CONSTANTS", bold)
+    headers = ["Factor ID", "CO2 Factor", "Unit", "CH4 Factor (g)", "N2O Factor (g)"]
+    worksheet.write_row("A2", headers, header_fmt)
+    
+    row = 2
+    factor_map = {} # Store cell references for factors
+    
+    # Flatten factor dict for writing
+    flat_factors = []
+    
+    # Helper to map complex keys to simpler display names and units
+    def get_unit(k):
+        return k.split("_")[-1]
+
+    for key, val in FACTORS.items():
+        if key == "gwp": continue
+        # Extract unit from the CO2 key (e.g., 'co2_kg_per_gal' -> 'gal')
+        unit = list(val.keys())[0].split("_")[-1]
+        
+        worksheet.write(row, 0, key) # A
+        worksheet.write(row, 1, val[list(val.keys())[0]], num_fmt) # B (CO2)
+        worksheet.write(row, 2, unit) # C
+        worksheet.write(row, 3, val[list(val.keys())[1]], num_fmt) # D (CH4)
+        worksheet.write(row, 4, val[list(val.keys())[2]], num_fmt) # E (N2O)
+        
+        # Store reference: e.g., 'gasoline': {'co2': 'B3', 'ch4': 'D3', 'n2o': 'E3'}
+        factor_map[key] = {
+            'co2': f"B{row+1}",
+            'ch4': f"D{row+1}",
+            'n2o': f"E{row+1}"
+        }
+        row += 1
+        
+    # GWP Section
+    row += 1
+    worksheet.write(row, 0, "GWP Constants", bold)
+    gwp_row = row + 1
+    worksheet.write(gwp_row, 0, "CO2"); worksheet.write(gwp_row, 1, FACTORS['gwp']['co2'])
+    worksheet.write(gwp_row+1, 0, "CH4"); worksheet.write(gwp_row+1, 1, FACTORS['gwp']['ch4'])
+    worksheet.write(gwp_row+2, 0, "N2O"); worksheet.write(gwp_row+2, 1, FACTORS['gwp']['n2o'])
+    
+    ref_gwp_ch4 = f"B{gwp_row+2}"
+    ref_gwp_n2o = f"B{gwp_row+3}"
+    
+    # --- SECTION 2: USER INPUTS & CALCS ---
+    start_row = row + 5
+    worksheet.write(start_row, 0, "CALCULATIONS", bold)
+    calc_headers = ["Category", "Input Amount", "Unit", "CO2 (kg)", "CH4 (g)", "N2O (g)", "Total CO2e (kg)", "Total CO2e (MT)"]
+    worksheet.write_row(start_row+1, calc_headers, header_fmt)
+    
+    current_row = start_row + 2
+    
+    # Helper to write a calculation row
+    def write_calc_row(name, amount, unit, factor_key, unit_mult=1):
+        nonlocal current_row
+        f_refs = factor_map[factor_key]
+        
+        worksheet.write(current_row, 0, name) # A
+        worksheet.write(current_row, 1, amount, num_fmt) # B (Input)
+        worksheet.write(current_row, 2, unit) # C
+        
+        # Formulas
+        # CO2 = Input * Multiplier * Factor_CO2
+        f_co2 = f"=B{current_row+1}*{unit_mult}*{f_refs['co2']}"
+        worksheet.write_formula(current_row, 3, f_co2, num_fmt)
+        
+        # CH4
+        f_ch4 = f"=B{current_row+1}*{unit_mult}*{f_refs['ch4']}"
+        worksheet.write_formula(current_row, 4, f_ch4, num_fmt)
+        
+        # N2O
+        f_n2o = f"=B{current_row+1}*{unit_mult}*{f_refs['n2o']}"
+        worksheet.write_formula(current_row, 5, f_n2o, num_fmt)
+        
+        # Total CO2e = CO2 + (CH4/1000 * GWP_CH4) + (N2O/1000 * GWP_N2O)
+        # Columns: D is CO2, E is CH4, F is N2O
+        f_total = f"=D{current_row+1} + (E{current_row+1}/1000*{ref_gwp_ch4}) + (F{current_row+1}/1000*{ref_gwp_n2o})"
+        worksheet.write_formula(current_row, 6, f_total, num_fmt)
+        
+        # Metric Tons
+        worksheet.write_formula(current_row, 7, f"=G{current_row+1}/1000", num_fmt)
+        
+        current_row += 1
+
+    # Write rows
+    write_calc_row("Vehicle", inputs_dict['gallons'], "gallons", "gasoline")
+    
+    if inputs_dict['heat_source'] == "Fuel Oil":
+        write_calc_row("Heating (Oil)", inputs_dict['oil_gallons'], "gallons", "fuel_oil")
+    elif inputs_dict['heat_source'] == "Natural Gas":
+        write_calc_row("Heating (Gas)", inputs_dict['nat_gas_therms'], "therms", "natural_gas")
+        
+    write_calc_row("Electricity", inputs_dict['elec_kwh'], "kWh", "electricity", unit_mult=0.001)
+    write_calc_row("Air Short", inputs_dict['air_s'], "miles", "air_short")
+    write_calc_row("Air Med", inputs_dict['air_m'], "miles", "air_medium")
+    write_calc_row("Air Long", inputs_dict['air_l'], "miles", "air_long")
+    write_calc_row("Rail NE", inputs_dict['rail_ne'], "miles", "rail_ne")
+    write_calc_row("Rail Other", inputs_dict['rail_o'], "miles", "rail_other")
+    
+    # Grand Total
+    worksheet.write(current_row, 6, "GRAND TOTAL (MT):", bold)
+    worksheet.write_formula(current_row, 7, f"=SUM(H{start_row+3}:H{current_row})", workbook.add_format({'bold': True, 'num_format': '0.00'}))
+
+    workbook.close()
+    return output.getvalue()
+
+# Collect inputs for export
+input_data = {
+    'gallons': gallons_gas,
+    'heat_source': heat_source,
+    'oil_gallons': oil_gallons,
+    'nat_gas_therms': nat_gas_therms,
+    'elec_kwh': elec_total_kwh,
+    'air_s': air_short,
+    'air_m': air_med,
+    'air_l': air_long,
+    'rail_ne': rail_ne,
+    'rail_o': rail_other
+}
+
+st.markdown("---")
+st.subheader("Export Report")
+st.caption("Download an Excel file containing all inputs, standard emission factors, and the formulas used to calculate these results.")
+
+xlsx_data = to_excel_with_formulas(df_res, input_data)
+st.download_button(
+    label="Download .xlsx Report",
+    data=xlsx_data,
+    file_name="carbon_footprint_2025.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+)

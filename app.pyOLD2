@@ -1,0 +1,240 @@
+import streamlit as st
+import pandas as pd
+import io
+import plotly.express as px
+
+# --- CONSTANTS & EMISSION FACTORS ---
+FACTORS = {
+    # Scope 1: Vehicle
+    "gasoline": {
+        "co2_kg_per_gal": 8.78,
+        "ch4_g_per_gal": 0.38,
+        "n2o_g_per_gal": 0.08
+    },
+    # Scope 1: Heating
+    "fuel_oil": { 
+        "co2_kg_per_gal": 10.21, 
+        "ch4_g_per_gal": 0.41,
+        "n2o_g_per_gal": 0.08
+    },
+    "natural_gas": { 
+        "co2_kg_per_therm": 5.3, 
+        "ch4_g_per_therm": 0.1, 
+        "n2o_g_per_therm": 0.01 
+    },
+    # Scope 2: Electricity
+    "electricity": {
+        "co2_kg_per_mwh": 243.3196,
+        "ch4_g_per_mwh": 28.6,
+        "n2o_g_per_mwh": 3.6
+    },
+    # Scope 3: Air Travel
+    "air_short": { "co2_kg_per_mi": 0.207, "ch4_g_per_mi": 0.0064, "n2o_g_per_mi": 0.0066 },
+    "air_medium": { "co2_kg_per_mi": 0.12926, "ch4_g_per_mi": 0.00064, "n2o_g_per_mi": 0.00410 },
+    "air_long": { "co2_kg_per_mi": 0.16256, "ch4_g_per_mi": 0.00064, "n2o_g_per_mi": 0.00518 },
+    # Scope 3: Rail Travel
+    "rail_ne": { "co2_kg_per_mi": 0.058, "ch4_g_per_mi": 0.0055, "n2o_g_per_mi": 0.0007 },
+    "rail_other": { "co2_kg_per_mi": 0.15, "ch4_g_per_mi": 0.0117, "n2o_g_per_mi": 0.0038 },
+    # GWP
+    "gwp": { "co2": 1, "ch4": 28, "n2o": 265 }
+}
+
+def calculate_co2e(amount, factor_key, unit_conversion=1):
+    f = FACTORS[factor_key]
+    # Dynamically find the keys (handling 'kg' vs 'g' differences in naming)
+    k_co2 = [k for k in f.keys() if 'co2' in k][0]
+    k_ch4 = [k for k in f.keys() if 'ch4' in k][0]
+    k_n2o = [k for k in f.keys() if 'n2o' in k][0]
+
+    co2 = amount * unit_conversion * f[k_co2]
+    ch4_g = amount * unit_conversion * f[k_ch4]
+    n2o_g = amount * unit_conversion * f[k_n2o]
+    
+    co2e_kg = (co2 * FACTORS["gwp"]["co2"]) + \
+              (ch4_g / 1000 * FACTORS["gwp"]["ch4"]) + \
+              (n2o_g / 1000 * FACTORS["gwp"]["n2o"])
+    return co2e_kg
+
+# --- STREAMLIT APP ---
+
+st.set_page_config(page_title="Personal Carbon Calculator", layout="wide")
+st.title("🌱 Personal Greenhouse Gas Emissions Calculator")
+
+st.sidebar.header("1. Vehicle (Scope 1)")
+car_miles = st.sidebar.number_input("Miles Driven (Year)", value=7989)
+car_mpg = st.sidebar.number_input("Average MPG", value=34.2)
+gallons_gas = car_miles / car_mpg if car_mpg > 0 else 0
+
+st.sidebar.header("2. Home Heating (Scope 1/2)")
+heat_source = st.sidebar.selectbox("Primary Heating Source", ["Electric (Heat Pumps)", "Fuel Oil", "Natural Gas"])
+oil_gallons = 0
+nat_gas_therms = 0
+if heat_source == "Fuel Oil":
+    oil_gallons = st.sidebar.number_input("Gallons of Oil", value=0)
+elif heat_source == "Natural Gas":
+    nat_gas_therms = st.sidebar.number_input("Therms of Gas", value=0)
+
+# --- UPDATED ELECTRICITY SECTION ---
+st.sidebar.header("3. Electricity (Scope 2)")
+# Default value taken from your spreadsheet (Source 2)
+default_bills = "1186, 1199, 837, 849, 539, 603, 685, 323, 493, 474, 654, 902"
+elec_input_str = st.sidebar.text_area(
+    "Electricity Usage (kWh)", 
+    value=default_bills,
+    help="Enter a single total OR a comma-separated list of monthly bills (e.g., '100, 200, 150')."
+)
+
+# Parse logic
+try:
+    # 1. Split by comma, 2. Strip whitespace, 3. Convert to float, 4. Sum
+    elec_values = [float(x.strip()) for x in elec_input_str.split(',') if x.strip()]
+    elec_total_kwh = sum(elec_values)
+    st.sidebar.caption(f"**Total Parsed:** {elec_total_kwh:,.0f} kWh ({len(elec_values)} entries)")
+except ValueError:
+    st.sidebar.error("Error parsing electricity input. Please ensure it is a list of numbers separated by commas.")
+    elec_total_kwh = 0
+
+st.sidebar.header("4. Travel (Scope 3)")
+st.sidebar.markdown("**Air Travel (Miles)**")
+air_short = st.sidebar.number_input("Short Haul (<300 mi)", value=1155)
+air_med = st.sidebar.number_input("Medium Haul (300-2300 mi)", value=8680)
+air_long = st.sidebar.number_input("Long Haul (>2300 mi)", value=20241)
+st.sidebar.markdown("**Rail Travel (Miles)**")
+rail_ne = st.sidebar.number_input("Northeast Corridor", value=451)
+rail_other = st.sidebar.number_input("Other Routes", value=207)
+
+# --- CALCULATIONS ---
+results = []
+
+# Scope 1
+results.append({"Category": "Vehicle", "Scope": "Scope 1", "CO2e (kg)": calculate_co2e(gallons_gas, "gasoline")})
+if heat_source == "Fuel Oil":
+    results.append({"Category": "Heating (Oil)", "Scope": "Scope 1", "CO2e (kg)": calculate_co2e(oil_gallons, "fuel_oil")})
+elif heat_source == "Natural Gas":
+    results.append({"Category": "Heating (Gas)", "Scope": "Scope 1", "CO2e (kg)": calculate_co2e(nat_gas_therms, "natural_gas")})
+
+# Scope 2 (Using the parsed total)
+results.append({"Category": "Electricity", "Scope": "Scope 2", "CO2e (kg)": calculate_co2e(elec_total_kwh, "electricity", 0.001)})
+
+# Scope 3
+results.append({"Category": "Air (Short)", "Scope": "Scope 3", "CO2e (kg)": calculate_co2e(air_short, "air_short")})
+results.append({"Category": "Air (Med)", "Scope": "Scope 3", "CO2e (kg)": calculate_co2e(air_med, "air_medium")})
+results.append({"Category": "Air (Long)", "Scope": "Scope 3", "CO2e (kg)": calculate_co2e(air_long, "air_long")})
+results.append({"Category": "Rail (NE)", "Scope": "Scope 3", "CO2e (kg)": calculate_co2e(rail_ne, "rail_ne")})
+results.append({"Category": "Rail (Other)", "Scope": "Scope 3", "CO2e (kg)": calculate_co2e(rail_other, "rail_other")})
+
+df_res = pd.DataFrame(results)
+df_res["CO2e (MT)"] = df_res["CO2e (kg)"] / 1000
+total_emissions = df_res["CO2e (MT)"].sum()
+
+# --- DISPLAY ---
+col1, col2 = st.columns([2, 1])
+with col1:
+    st.subheader("Emission Breakdown")
+    fig = px.pie(df_res, values='CO2e (MT)', names='Category', hole=0.4, color_discrete_sequence=px.colors.qualitative.Prism)
+    st.plotly_chart(fig, use_container_width=True)
+
+with col2:
+    st.subheader("Summary")
+    st.metric(label="Total Metric Tons CO2e", value=f"{total_emissions:.2f}")
+    st.markdown("### By Scope")
+    st.dataframe(df_res.groupby("Scope")["CO2e (MT)"].sum().reset_index().style.format({"CO2e (MT)": "{:.2f}"}), hide_index=True)
+
+# --- EXCEL EXPORT (Updated to handle list sum) ---
+def to_excel_with_formulas(df_data, inputs_dict, raw_elec_str):
+    output = io.BytesIO()
+    workbook = xlsxwriter.Workbook(output, {'in_memory': True})
+    bold = workbook.add_format({'bold': True})
+    header_fmt = workbook.add_format({'bold': True, 'bg_color': '#D3D3D3', 'border': 1})
+    num_fmt = workbook.add_format({'num_format': '0.00'})
+    
+    ws = workbook.add_worksheet("Carbon Footprint")
+    
+    # Write Constants
+    ws.write("A1", "EMISSION FACTORS", bold)
+    ws.write_row("A2", ["Factor ID", "CO2 Factor", "Unit", "CH4 Factor", "N2O Factor"], header_fmt)
+    row = 2
+    factor_map = {}
+    for key, val in FACTORS.items():
+        if key == "gwp": continue
+        k_co2 = [k for k in val.keys() if 'co2' in k][0]
+        unit = k_co2.split("_")[-1]
+        ws.write(row, 0, key); ws.write(row, 1, val[k_co2], num_fmt); ws.write(row, 2, unit)
+        ws.write(row, 3, val[[k for k in val.keys() if 'ch4' in k][0]], num_fmt)
+        ws.write(row, 4, val[[k for k in val.keys() if 'n2o' in k][0]], num_fmt)
+        factor_map[key] = {'co2': f"B{row+1}", 'ch4': f"D{row+1}", 'n2o': f"E{row+1}"}
+        row += 1
+    
+    # Write GWP
+    row += 1
+    ws.write(row, 0, "GWP Constants", bold)
+    gwp_start = row + 1
+    ws.write(gwp_start, 0, "CO2"); ws.write(gwp_start, 1, FACTORS['gwp']['co2'])
+    ws.write(gwp_start+1, 0, "CH4"); ws.write(gwp_start+1, 1, FACTORS['gwp']['ch4'])
+    ws.write(gwp_start+2, 0, "N2O"); ws.write(gwp_start+2, 1, FACTORS['gwp']['n2o'])
+    ref_gwp_ch4 = f"B{gwp_start+2}"
+    ref_gwp_n2o = f"B{gwp_start+3}"
+
+    # Write Calculations
+    start_row = row + 5
+    ws.write(start_row, 0, "CALCULATIONS", bold)
+    ws.write_row(start_row+1, ["Category", "Input Amount", "Unit", "CO2 (kg)", "CH4 (g)", "N2O (g)", "Total CO2e (MT)"], header_fmt)
+    
+    curr = start_row + 2
+    def write_row(name, amt, unit, f_key, mult=1):
+        nonlocal curr
+        f = factor_map[f_key]
+        ws.write(curr, 0, name)
+        ws.write(curr, 1, amt, num_fmt)
+        ws.write(curr, 2, unit)
+        # Formulas
+        ws.write_formula(curr, 3, f"=B{curr+1}*{mult}*{f['co2']}", num_fmt)
+        ws.write_formula(curr, 4, f"=B{curr+1}*{mult}*{f['ch4']}", num_fmt)
+        ws.write_formula(curr, 5, f"=B{curr+1}*{mult}*{f['n2o']}", num_fmt)
+        # Total MT
+        f_mt = f"=(D{curr+1} + (E{curr+1}/1000*{ref_gwp_ch4}) + (F{curr+1}/1000*{ref_gwp_n2o})) / 1000"
+        ws.write_formula(curr, 6, f_mt, num_fmt)
+        curr += 1
+
+    write_row("Vehicle", inputs_dict['gallons'], "gallons", "gasoline")
+    if inputs_dict['heat_source'] == "Fuel Oil": write_row("Heating (Oil)", inputs_dict['oil_gallons'], "gallons", "fuel_oil")
+    elif inputs_dict['heat_source'] == "Natural Gas": write_row("Heating (Gas)", inputs_dict['nat_gas_therms'], "therms", "natural_gas")
+    
+    # Specific note for electricity:
+    ws.write(curr, 0, "Electricity")
+    ws.write(curr, 1, inputs_dict['elec_kwh'], num_fmt) 
+    ws.write_comment(curr, 1, f"Sum of inputs: {raw_elec_str}") # Add comment with original list
+    ws.write(curr, 2, "kWh")
+    f_elec = factor_map["electricity"]
+    ws.write_formula(curr, 3, f"=B{curr+1}*0.001*{f_elec['co2']}", num_fmt)
+    ws.write_formula(curr, 4, f"=B{curr+1}*0.001*{f_elec['ch4']}", num_fmt)
+    ws.write_formula(curr, 5, f"=B{curr+1}*0.001*{f_elec['n2o']}", num_fmt)
+    ws.write_formula(curr, 6, f"=(D{curr+1} + (E{curr+1}/1000*{ref_gwp_ch4}) + (F{curr+1}/1000*{ref_gwp_n2o})) / 1000", num_fmt)
+    curr += 1
+
+    write_row("Air Short", inputs_dict['air_s'], "miles", "air_short")
+    write_row("Air Med", inputs_dict['air_m'], "miles", "air_medium")
+    write_row("Air Long", inputs_dict['air_l'], "miles", "air_long")
+    write_row("Rail NE", inputs_dict['rail_ne'], "miles", "rail_ne")
+    write_row("Rail Other", inputs_dict['rail_o'], "miles", "rail_other")
+
+    ws.write(curr, 5, "TOTAL (MT):", bold)
+    ws.write_formula(curr, 6, f"=SUM(G{start_row+3}:G{curr})", workbook.add_format({'bold': True, 'num_format': '0.00'}))
+    workbook.close()
+    return output.getvalue()
+
+# Export Inputs
+input_data = {
+    'gallons': gallons_gas,
+    'heat_source': heat_source,
+    'oil_gallons': oil_gallons,
+    'nat_gas_therms': nat_gas_therms,
+    'elec_kwh': elec_total_kwh,
+    'air_s': air_short, 'air_m': air_med, 'air_l': air_long,
+    'rail_ne': rail_ne, 'rail_o': rail_other
+}
+
+st.markdown("---")
+xlsx_data = to_excel_with_formulas(df_res, input_data, elec_input_str)
+st.download_button("Download .xlsx Report", xlsx_data, "carbon_footprint_2025.xlsx")
+
